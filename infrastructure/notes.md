@@ -4,93 +4,19 @@
 
 ## Cloud Provider
 
-**AWS** — native integration across S3, SQS, MediaConvert, ECS, RDS, and CloudFront. Strong regional presence in `ca-central-1` and `eu-west-1`/`eu-central-1`. All services used are first-party — no third-party SaaS dependencies.
+**AWS** — native integration across S3, SQS, MediaConvert, ECS, RDS, and CloudFront. Strong regional presence in `ca-central-1` and `eu-west-1`/`eu-central-1`. Core infrastructure uses AWS first-party services; Slack is only used as an alert destination.
 
 ---
 
 ## Infrastructure as Code
 
-**Terraform** manages all AWS resources:
-
-```
-infrastructure/
-  terraform/
-    main.tf           # provider, backend config
-    s3.tf             # raw-uploads + processed-videos buckets
-    sqs.tf            # transcoding-jobs queue + DLQ
-    lambda.tf         # job submission + completion handler functions
-    eventbridge.tf    # MediaConvert job state change rule (PROGRESSING, COMPLETE, ERROR)
-    mediaconvert.tf   # IAM role for MediaConvert, job template
-    ecs.tf            # Fargate cluster + upload service task/service
-    rds.tf            # PostgreSQL RDS instance (Multi-AZ)
-    cognito.tf        # user pool + app client
-    cloudfront.tf     # CDN distribution (processed-videos origin)
-    api_gateway.tf    # HTTP API + routes + JWT authorizer
-    iam.tf            # roles and policies
-    monitoring.tf     # CloudWatch alarms, dashboards
-    variables.tf
-    outputs.tf
-```
-
-All changes go through a PR with `terraform plan` output reviewed before `terraform apply`.
-State is stored in S3 with DynamoDB locking.
+In a production implementation, AWS resources would be managed with Terraform or AWS CDK. This repository is a system design artifact, so IaC files are intentionally not included.
 
 ---
 
 ## CI/CD Pipeline
 
-**GitHub Actions** handles all build and deploy steps.
-
-### Upload Service (Node.js on ECS Fargate)
-
-```yaml
-# .github/workflows/upload-service.yml
-on:
-  push:
-    branches: [main]
-    paths: ['services/upload-service/**']
-
-jobs:
-  build-and-deploy:
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run tests
-        run: npm ci && npm test
-      - name: Build and push Docker image to ECR
-        run: |
-          aws ecr get-login-password | docker login --username AWS --password-stdin $ECR_REGISTRY
-          docker build -t upload-service .
-          docker tag upload-service $ECR_REGISTRY/upload-service:$GITHUB_SHA
-          docker push $ECR_REGISTRY/upload-service:$GITHUB_SHA
-      - name: Deploy to ECS (rolling update)
-        run: |
-          aws ecs update-service \
-            --cluster video-platform \
-            --service upload-service \
-            --force-new-deployment
-```
-
-### MediaConvert Lambda Functions (Python)
-
-```yaml
-- name: Package and deploy Lambda functions
-  run: |
-    pip install -r requirements.txt -t package/
-    cp code/mediaconvert_job.py package/
-    cd package && zip -r ../function.zip .
-    aws lambda update-function-code \
-      --function-name mediaconvert-job-submit \
-      --zip-file fileb://../function.zip
-    aws lambda update-function-code \
-      --function-name mediaconvert-completion \
-      --zip-file fileb://../function.zip
-```
-
-### Deployment Strategy
-
-- **Upload Service:** ECS rolling update — zero downtime, minimum 2 tasks always running
-- **Lambda functions:** Atomic code update — Lambda handles versioning
-- **Database migrations:** Run as a one-off ECS task before service deploy (e.g., `node-pg-migrate`)
+In production, GitHub Actions or a similar CI/CD system would build and deploy the Upload Service, Lambda functions, and database migrations. The exact workflow files are intentionally out of scope for this design submission.
 
 ---
 

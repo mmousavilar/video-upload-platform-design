@@ -2,21 +2,21 @@
  * Upload Service — Presigned URL Generation & Status Polling
  *
  * Express route handlers for:
- *   POST /videos/upload-url  — generate presigned S3 PUT URL
+ *   POST /videos/upload-url  — generate presigned S3 PUT URL (small files)
  *   GET  /videos/:id/status  — poll processing status
  *
  * Flow:
- *   1. Validate request (file size, MIME type)
- *   2. Create a video record in PostgreSQL (status: pending)
- *   3. Generate a presigned S3 PUT URL (60-minute TTL)
- *   4. Return videoId + presigned URL to client
+ *   1. Resolve internal user ID from Cognito subject
+ *   2. Validate request (file size, MIME type)
+ *   3. Create a video record in PostgreSQL (status: pending)
+ *   4. Generate a presigned S3 PUT URL (60-minute TTL)
+ *   5. Return videoId + presigned URL to client
  *
  * The client uploads the file directly to S3 — no video bytes
  * ever pass through this service.
  *
- * Status polling reads directly from PostgreSQL. At 20–50k DAU with
- * 5–10s polling intervals, a single RDS instance handles this load
- * comfortably. No cache layer is needed at launch.
+ * For large files (>100 MB), clients use the multipart upload endpoints
+ * instead, which issue per-part presigned URLs and support resumable transfers.
  *
  * Dependencies:
  *   npm install @aws-sdk/client-s3 @aws-sdk/s3-request-presigner
@@ -30,7 +30,7 @@ import { pool } from '../db/pool.js'; // pg Pool instance
 
 const s3 = new S3Client({ region: process.env.AWS_REGION ?? 'ca-central-1' });
 
-const RAW_BUCKET = process.env.RAW_UPLOADS_BUCKET;   // e.g. "my-platform-raw-uploads"
+const RAW_BUCKET = process.env.RAW_UPLOADS_BUCKET;
 const PRESIGNED_URL_TTL_SECONDS = 3600;               // 60 minutes
 const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024 * 1024;  // 5 GB
 
@@ -43,6 +43,22 @@ const ALLOWED_MIME_TYPES = new Set([
 ]);
 
 /**
+ * Resolve the internal users.id UUID from a Cognito subject claim.
+ *
+ * The JWT `sub` claim is the Cognito identity, stored in users.cognito_sub.
+ * The videos table references users.id (an internal UUID) as its FK, so we
+ * map cognito_sub → users.id before creating any video records. This keeps
+ * the auth identity decoupled from the internal data model.
+ */
+async function resolveUserId(cognitoSub) {
+  const result = await pool.query(
+    'SELECT id FROM users WHERE cognito_sub = $1',
+    [cognitoSub]
+  );
+  return result.rows[0]?.id ?? null;
+}
+
+/**
  * POST /videos/upload-url
  *
  * Request body:
@@ -53,7 +69,16 @@ const ALLOWED_MIME_TYPES = new Set([
  */
 export async function createUploadUrl(req, res) {
   const { filename, fileSizeBytes, mimeType } = req.body;
-  const userId = req.user.sub; // Cognito subject from verified JWT
+  const cognitoSub = req.user.sub;
+
+  // Map Cognito sub to internal user ID
+  const userId = await resolveUserId(cognitoSub);
+  if (!userId) {
+    return res.status(401).json({
+      error: 'USER_NOT_FOUND',
+      message: 'No account found for this identity.',
+    });
+  }
 
   // --- Validation ---
   const errors = [];
@@ -139,15 +164,15 @@ export async function createUploadUrl(req, res) {
  * GET /videos/:id/status
  *
  * Returns video processing status. Reads directly from PostgreSQL.
- *
- * At 20–50k DAU with 5–10s polling intervals, this is a simple indexed
- * primary key lookup — well within RDS capacity without a cache layer.
- * If polling load becomes a concern at higher scale, a read replica or
- * short-lived application cache can be added without changing this contract.
  */
 export async function getVideoStatus(req, res) {
   const { id: videoId } = req.params;
-  const userId = req.user.sub;
+  const cognitoSub = req.user.sub;
+
+  const userId = await resolveUserId(cognitoSub);
+  if (!userId) {
+    return res.status(401).json({ error: 'USER_NOT_FOUND', message: 'No account found for this identity.' });
+  }
 
   const result = await pool.query(
     `SELECT v.id, v.status, v.output_s3_prefix, v.thumbnail_url, v.user_id,

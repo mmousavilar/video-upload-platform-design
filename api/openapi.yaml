@@ -124,6 +124,134 @@ paths:
                 error: "VIDEO_PROCESSING"
                 message: "Video is currently queued or processing and cannot be deleted."
 
+  # --- Multipart Upload (for files >100 MB) ---
+  # S3 multipart upload splits a file into independently uploaded parts,
+  # making large transfers resumable. The ObjectCreated event fires only
+  # after CompleteMultipartUpload, so the transcoding pipeline is unchanged.
+
+  /videos/multipart/init:
+    post:
+      summary: Initialize a multipart upload
+      description: Creates a video record and starts an S3 multipart upload session. Returns videoId and uploadId.
+      operationId: initMultipartUpload
+      tags:
+        - Multipart Upload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUploadUrlRequest"
+      responses:
+        "201":
+          description: Multipart upload initialized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InitMultipartResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/FileTooLarge"
+
+  /videos/{videoId}/multipart/{uploadId}/url:
+    get:
+      summary: Get presigned URL for a part
+      description: Returns a presigned PUT URL for a single upload part. Client retains the ETag from the S3 response.
+      operationId: getPartUploadUrl
+      tags:
+        - Multipart Upload
+      parameters:
+        - $ref: "#/components/parameters/VideoId"
+        - name: uploadId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: partNumber
+          in: query
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10000
+      responses:
+        "200":
+          description: Presigned URL for the part
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartUrlResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /videos/{videoId}/multipart/{uploadId}/complete:
+    post:
+      summary: Complete a multipart upload
+      description: Assembles all parts. S3 fires ObjectCreated and the transcoding pipeline starts.
+      operationId: completeMultipartUpload
+      tags:
+        - Multipart Upload
+      parameters:
+        - $ref: "#/components/parameters/VideoId"
+        - name: uploadId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompleteMultipartRequest"
+      responses:
+        "200":
+          description: Upload finalized
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  videoId:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    example: pending
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /videos/{videoId}/multipart/{uploadId}/abort:
+    delete:
+      summary: Abort a multipart upload
+      description: Cancels the upload and removes uploaded parts from S3.
+      operationId: abortMultipartUpload
+      tags:
+        - Multipart Upload
+      parameters:
+        - $ref: "#/components/parameters/VideoId"
+        - name: uploadId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Upload aborted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -307,6 +435,53 @@ components:
         message:
           type: string
           example: Processing failed
+
+    InitMultipartResponse:
+      type: object
+      required:
+        - videoId
+        - uploadId
+      properties:
+        videoId:
+          type: string
+          format: uuid
+        uploadId:
+          type: string
+          description: S3 multipart upload ID — pass to subsequent part-url, complete, and abort calls.
+
+    PartUrlResponse:
+      type: object
+      required:
+        - partNumber
+        - presignedUrl
+        - expiresAt
+      properties:
+        partNumber:
+          type: integer
+        presignedUrl:
+          type: string
+          format: uri
+        expiresAt:
+          type: string
+          format: date-time
+
+    CompleteMultipartRequest:
+      type: object
+      required:
+        - parts
+      properties:
+        parts:
+          type: array
+          items:
+            type: object
+            required:
+              - partNumber
+              - etag
+            properties:
+              partNumber:
+                type: integer
+              etag:
+                type: string
 
     ErrorResponse:
       type: object

@@ -36,7 +36,7 @@ See [`architecture/diagram.md`](architecture/diagram.md) for the annotated archi
 | 1 | Client | Authenticates via Cognito, receives JWT |
 | 2 | Client | `POST /videos/upload-url` with filename, size, MIME type |
 | 3 | Upload Service | Validates request, creates `video` record (status: `pending`), returns presigned S3 PUT URL + `videoId` |
-| 4 | Client | Uploads file **directly** to S3 — no bytes touch our servers. For files >100 MB, S3 multipart upload makes the transfer resumable; it's compatible with the presigned URL architecture. |
+| 4 | Client | Uploads file **directly** to S3 — no bytes touch our servers. Small files use a single presigned PUT; large files (>100 MB) use S3 multipart upload for resumability. |
 | 5 | S3 | Fires `s3:ObjectCreated` → SQS `transcoding-jobs` queue |
 | 6 | Client | (Optional) `POST /videos/:id/metadata` to submit title/description |
 | 7 | Job Submission Lambda | Triggered by SQS; submits MediaConvert job; updates video status → `queued` |
@@ -179,10 +179,14 @@ See [`api/openapi.yaml`](api/openapi.yaml) for the full OpenAPI 3.0 spec.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/videos/upload-url` | Request a presigned S3 URL to upload a video |
-| `POST` | `/videos/:id/metadata` | Submit title, description, tags after upload |
+| `POST` | `/videos/upload-url` | Presigned S3 URL for single-PUT upload (small files) |
+| `POST` | `/videos/multipart/init` | Initialize S3 multipart upload (large files >100 MB) |
+| `GET` | `/videos/:id/multipart/:uploadId/url?partNumber=N` | Presigned URL for one multipart part |
+| `POST` | `/videos/:id/multipart/:uploadId/complete` | Finalize multipart upload |
+| `DELETE` | `/videos/:id/multipart/:uploadId/abort` | Abort multipart upload |
+| `POST` | `/videos/:id/metadata` | Submit title, description, tags |
 | `GET` | `/videos/:id/status` | Poll processing status |
-| `DELETE` | `/videos/:id` | Cancel/delete an upload |
+| `DELETE` | `/videos/:id` | Cancel/delete a video |
 
 ---
 
@@ -216,8 +220,8 @@ See [`infrastructure/notes.md`](infrastructure/notes.md) for full details.
 ### Summary
 
 - **Cloud Provider:** AWS (Canada/Europe coverage via CloudFront + multi-AZ RDS)
-- **IaC:** Terraform — all resources defined as code, reviewed via PR
-- **CI/CD:** GitHub Actions → ECR image build → ECS rolling deploy
+- **IaC:** Terraform (proposed — not included in this repo)
+- **CI/CD:** GitHub Actions → ECR → ECS rolling deploy (proposed)
 - **Autoscaling:** Upload Service scales on CPU; MediaConvert scales automatically; Lambda scales with event volume
 - **Fault Tolerance:** SQS DLQ after 3 retries, CloudWatch alarm on DLQ depth, RDS Multi-AZ
 - **Backups:** RDS automated daily snapshots, S3 versioning on processed-videos bucket

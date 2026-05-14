@@ -16,7 +16,9 @@ The diagram shows the complete upload flow from client to playback-ready storage
 
 ### Upload Service (Node.js/TypeScript on ECS Fargate)
 - Stateless REST service, min 2 tasks
-- Generates presigned S3 PUT URLs (60-minute TTL)
+- Resolves internal user ID from Cognito `sub` claim before creating records
+- Generates presigned S3 PUT URLs (60-minute TTL) for single-file uploads
+- Orchestrates S3 multipart upload sessions for large files (>100 MB)
 - Creates video records in PostgreSQL (`pending`) on upload initiation
 - Serves status polling directly from PostgreSQL
 - Does **not** handle video bytes; does **not** receive MediaConvert callbacks
@@ -71,6 +73,24 @@ Transcoding job: queued  → processing → completed | failed
 ```
 
 `ready` is the user-facing video state. `completed` is the internal transcoding job state set on a successful MediaConvert `COMPLETE` event.
+
+---
+
+## Post-Upload Validation
+
+The presigned URL flow validates declared file size and MIME type *before* upload. But the actual S3 object may still be invalid — corrupted, mismatched content type, too long, or in an unsupported codec. Validation of the actual file happens during the processing step:
+
+**What gets checked:**
+- MediaConvert performs input validation when the job starts. If the file is unreadable, uses an unsupported codec, or is otherwise malformed, the job fails with an `ERROR` event and a descriptive error message.
+- The Job Submission Lambda can optionally check S3 object metadata (actual size, content type) before submitting the job, rejecting obvious mismatches early.
+- Duration limits (if enforced) can be checked via MediaConvert job settings or a lightweight ffprobe-style probe before submission.
+
+**Failure behavior:**
+- Video status is set to `failed` with a descriptive error stored in `transcoding_jobs.error_msg`.
+- No playback URLs are exposed — the status endpoint returns the error to the client.
+- The raw S3 object is not tagged `status=processed`, so it remains subject to the 7-day lifecycle expiry. For egregious violations (e.g., non-video file), the object could be deleted immediately or moved to a quarantine prefix.
+
+This approach keeps validation simple — MediaConvert itself is the primary validator, and explicit failures are surfaced through the existing status lifecycle without adding a separate validation service.
 
 ---
 
