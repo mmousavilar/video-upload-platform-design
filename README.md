@@ -34,7 +34,7 @@ See [`architecture/diagram.md`](architecture/diagram.md) for the annotated archi
 | Step | Actor | Action |
 |------|-------|--------|
 | 1 | Client | Authenticates via Cognito, receives JWT |
-| 2 | Client | `POST /videos/upload-url` with filename, size, MIME type |
+| 2 | Client | Requests an upload URL/session: `POST /videos/upload-url` for small files or `POST /videos/multipart/init` for large files. |
 | 3 | Upload Service | Validates request, creates `video` record (status: `pending`), returns presigned S3 PUT URL + `videoId` |
 | 4 | Client | Uploads file **directly** to S3 — no bytes touch our servers. Small files use a single presigned PUT; large files (>100 MB) use S3 multipart upload for resumability. |
 | 5 | S3 | Fires `s3:ObjectCreated` → SQS `transcoding-jobs` queue |
