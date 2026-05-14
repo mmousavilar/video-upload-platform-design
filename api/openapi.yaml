@@ -1,0 +1,377 @@
+openapi: 3.0.3
+info:
+  title: Video Upload Platform API
+  version: 1.0.0
+  description: Backend API for initiating video uploads, storing metadata, checking processing status, and deleting uploads.
+
+servers:
+  - url: https://api.example.com
+    description: Production API
+
+security:
+  - bearerAuth: []
+
+paths:
+  /videos/upload-url:
+    post:
+      summary: Request a presigned upload URL
+      description: Creates a video record and returns a short-lived presigned S3 URL for direct client upload.
+      operationId: createUploadUrl
+      tags:
+        - Videos
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUploadUrlRequest"
+      responses:
+        "201":
+          description: Presigned upload URL created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateUploadUrlResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/FileTooLarge"
+
+  /videos/{videoId}/metadata:
+    post:
+      summary: Submit video metadata
+      description: Updates title and description for an uploaded video.
+      operationId: updateVideoMetadata
+      tags:
+        - Videos
+      parameters:
+        - $ref: "#/components/parameters/VideoId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateMetadataRequest"
+      responses:
+        "200":
+          description: Metadata updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VideoMetadataResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /videos/{videoId}/status:
+    get:
+      summary: Get video processing status
+      description: Returns the current upload/transcoding status for a video.
+      operationId: getVideoStatus
+      tags:
+        - Videos
+      parameters:
+        - $ref: "#/components/parameters/VideoId"
+      responses:
+        "200":
+          description: Video status returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VideoStatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /videos/{videoId}:
+    delete:
+      summary: Delete a video
+      description: |
+        Deletes a video and its associated assets when the video is not actively processing.
+        If the video is currently queued or processing, the API returns 409.
+        This operation is irreversible.
+      operationId: deleteVideo
+      tags:
+        - Videos
+      parameters:
+        - $ref: "#/components/parameters/VideoId"
+      responses:
+        "204":
+          description: Video deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Video cannot be deleted while queued or processing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "VIDEO_PROCESSING"
+                message: "Video is currently queued or processing and cannot be deleted."
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Cognito-issued JWT.
+
+  parameters:
+    VideoId:
+      name: videoId
+      in: path
+      required: true
+      description: Unique video identifier.
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    CreateUploadUrlRequest:
+      type: object
+      required:
+        - filename
+        - fileSizeBytes
+        - mimeType
+      properties:
+        filename:
+          type: string
+          maxLength: 255
+          example: demo-video.mp4
+        fileSizeBytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 5368709120
+          example: 524288000
+        mimeType:
+          type: string
+          enum:
+            - video/mp4
+            - video/quicktime
+            - video/x-msvideo
+            - video/x-matroska
+            - video/webm
+          example: video/mp4
+
+    CreateUploadUrlResponse:
+      type: object
+      required:
+        - videoId
+        - presignedUrl
+        - expiresAt
+        - uploadInstructions
+      properties:
+        videoId:
+          type: string
+          format: uuid
+        presignedUrl:
+          type: string
+          format: uri
+        expiresAt:
+          type: string
+          format: date-time
+        uploadInstructions:
+          type: object
+          required:
+            - method
+            - headers
+          properties:
+            method:
+              type: string
+              example: PUT
+            headers:
+              type: object
+              additionalProperties:
+                type: string
+              example:
+                Content-Type: video/mp4
+                Content-Length: "524288000"
+
+    UpdateMetadataRequest:
+      type: object
+      required:
+        - title
+      properties:
+        title:
+          type: string
+          maxLength: 500
+          example: My upload
+        description:
+          type: string
+          nullable: true
+          example: Demo video description
+
+    VideoMetadataResponse:
+      type: object
+      required:
+        - videoId
+        - title
+        - status
+      properties:
+        videoId:
+          type: string
+          format: uuid
+        title:
+          type: string
+        description:
+          type: string
+          nullable: true
+        status:
+          $ref: "#/components/schemas/VideoStatus"
+
+    VideoStatus:
+      type: string
+      enum:
+        - pending
+        - queued
+        - processing
+        - ready
+        - failed
+      description: User-facing video lifecycle status.
+
+    VideoStatusResponse:
+      type: object
+      required:
+        - videoId
+        - status
+      properties:
+        videoId:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/VideoStatus"
+        outputs:
+          $ref: "#/components/schemas/VideoOutputs"
+        error:
+          $ref: "#/components/schemas/ProcessingError"
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    VideoOutputs:
+      type: object
+      nullable: true
+      properties:
+        hlsManifestUrl:
+          type: string
+          format: uri
+        thumbnailUrl:
+          type: string
+          format: uri
+        renditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/VideoRendition"
+
+    VideoRendition:
+      type: object
+      required:
+        - resolution
+        - url
+      properties:
+        resolution:
+          type: string
+          enum:
+            - 1080p
+            - 720p
+            - 360p
+        url:
+          type: string
+          format: uri
+
+    ProcessingError:
+      type: object
+      nullable: true
+      properties:
+        code:
+          type: string
+          example: TRANSCODING_FAILED
+        message:
+          type: string
+          example: Processing failed
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        details:
+          type: array
+          nullable: true
+          items:
+            type: object
+            additionalProperties: true
+
+  responses:
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: VALIDATION_ERROR
+            message: Request validation failed
+
+    Unauthorized:
+      description: Missing or invalid authentication token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: UNAUTHORIZED
+            message: Missing or invalid token
+
+    Forbidden:
+      description: User does not have access to this video
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: FORBIDDEN
+            message: Access denied
+
+    NotFound:
+      description: Video not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: NOT_FOUND
+            message: Video not found
+
+    FileTooLarge:
+      description: File exceeds maximum supported size
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: FILE_TOO_LARGE
+            message: Maximum file size is 5 GB
